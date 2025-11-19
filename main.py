@@ -1,8 +1,12 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Any, Dict
 
-app = FastAPI()
+from database import db, create_document, get_documents
+
+app = FastAPI(title="Transport SaaS API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,16 +18,12 @@ app.add_middleware(
 
 @app.get("/")
 def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
+    return {"message": "Transport SaaS API running"}
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
-
+# Health and DB test
 @app.get("/test")
 def test_database():
-    """Test endpoint to check if database is available and accessible"""
-    response = {
+    response: Dict[str, Any] = {
         "backend": "✅ Running",
         "database": "❌ Not Available",
         "database_url": None,
@@ -31,39 +31,71 @@ def test_database():
         "connection_status": "Not Connected",
         "collections": []
     }
-    
     try:
-        # Try to import database module
-        from database import db
-        
         if db is not None:
             response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
+            response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
+            response["database_name"] = os.getenv("DATABASE_NAME") or "❌ Not Set"
             response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
             try:
                 collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
+                response["collections"] = collections[:10]
                 response["database"] = "✅ Connected & Working"
             except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
+                response["database"] = f"⚠️  Connected but Error: {str(e)[:80]}"
         else:
             response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
     except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
+        response["database"] = f"❌ Error: {str(e)[:80]}"
     return response
 
+# ---------------- Public lead capture: Quote ----------------
+class QuoteRequest(BaseModel):
+    name: str
+    email: str
+    phone: str | None = None
+    origin: str
+    destination: str
+    date: str | None = None
+    cargo_details: str | None = None
+    weight_kg: float | None = None
+    volume_m3: float | None = None
+
+@app.post("/api/quotes")
+def create_quote(quote: QuoteRequest):
+    try:
+        quote_id = create_document("quote", quote)
+        return {"ok": True, "id": quote_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/quotes")
+def list_quotes():
+    try:
+        docs = get_documents("quote", limit=50)
+        # stringify ObjectIds for safety
+        for d in docs:
+            if "_id" in d:
+                d["_id"] = str(d["_id"])
+        return {"ok": True, "items": docs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Simple public shipment tracking lookup by tracking_code
+@app.get("/api/track/{tracking_code}")
+def track_shipment(tracking_code: str):
+    try:
+        results = get_documents("shipment", {"tracking_code": tracking_code}, limit=1)
+        if not results:
+            raise HTTPException(status_code=404, detail="Tracking code not found")
+        doc = results[0]
+        if "_id" in doc:
+            doc["_id"] = str(doc["_id"])
+        return {"ok": True, "shipment": doc}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
